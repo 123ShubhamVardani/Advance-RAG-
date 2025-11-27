@@ -1,0 +1,16 @@
+%% Simplified Vector / Retrieval Pipeline
+flowchart LR
+    A[User Input\nQuestion or File Upload] --> B[Document Loader\nPDF/TXT]
+    B --> C[Chunking\nRecursive Splitter\nchunk=1000 overlap=200]
+    C --> D[Embeddings\nModel: all-MiniLM-L6-v2]
+    D --> E[FAISS Vector Store\n(chunks + vectors)]
+    A --> Q[Query Text]
+    Q --> Qe[Embed Query\nSame model]
+    Qe --> E
+    E --> R[Similarity Search\nTop-k=3]
+    R --> PB[Prompt Builder\nAdd top chunks]
+    PB --> PSel[Provider Selector\nGroq / Gemini / HuggingFace / Offline]
+    PSel --> LLM[(LLM / OfflineBot)]
+    LLM --> Ans[Answer]
+    Ans --> Cache[Cache (MD5)]
+    Cache --> Display[Response to User]

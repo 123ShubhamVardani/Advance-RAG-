@@ -1,0 +1,4 @@
+This is a sample plain text document for testing.
+It includes a few lines of English text.
+नमस्ते — यह एक परीक्षण वाक्य है।
+End of file.

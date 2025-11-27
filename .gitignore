@@ -1,0 +1,51 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+dist/
+build/
+.env
+!env.example
+chat_log.txt
+startup_debug.log
+*.log
+*.sqlite3
+temp.*
+
+# Generated reports / combined outputs
+combined_report_*.txt
+combined_validator_output.json
+combined_selftest_output.json
+architecture_dark.png
+architecture_light.png
+architecture_*_thumb*.png
+architecture_dark_thumb*.png
+architecture_light_thumb*.png
+
+# Caches & uploads
+cache/
+uploads/
+
+# Editor
+.vscode/
+.idea/
+
+# Coverage / test artifacts
+htmlcov/
+.coverage*
+.pytest_cache/
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+

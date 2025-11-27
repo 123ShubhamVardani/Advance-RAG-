@@ -1,0 +1,27 @@
+%% Mermaid architecture diagram (source for mmdc conversion)
+flowchart TD
+    U[User\nChat / Upload / Voice] --> UI[Streamlit UI\nSidebar + Chat]
+    UI --> MM[Mode Manager\nauto/online/offline]
+    MM -->|Connectivity tests\nclassification| DG[Diagnostics]
+    UI --> UP[Document Upload]
+    UP --> DP[Document Processing\nPDF/TXT detect + split]
+    DP --> VS[Embeddings + FAISS]
+    VS --> RT[Retrieval]
+    MM --> PR[Provider Selection]
+    RT --> PB[Prompt Build]
+    PB --> PR
+    PR --> LLM[(LLM / OfflineBot)]
+    LLM --> RS[Response]
+    RS --> CA[Cache]
+    CA --> UI
+    RS --> TTS[Voice (TTS)]
+    subgraph Providers
+        GR[Groq]
+        GM[Gemini]
+        HF[HuggingFace]
+    end
+    PR --> GR
+    PR --> GM
+    PR --> HF
+    DG --> UI
+    DG --> MM

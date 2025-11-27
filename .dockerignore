@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual env
+.venv/
+venv/
+ENV/
+
+# Data / cache
+cache/
+logs/
+uploads/
+*.log
+
+# Git
+.git
+.gitignore
+
+# Misc
+.DS_Store
+*.swp
