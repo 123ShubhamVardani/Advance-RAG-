@@ -157,13 +157,13 @@ SERPAPI_API_KEY=...        # Web search
 ### Model Options
 
 **Groq Models:**
-- `llama3-8b-8192` - Fast, general purpose
-- `mixtral-8x7b-32768` - Larger context window
+- `llama-3.1-8b-instant` - Fast, general purpose
+- `qwen/qwen3-32b` - Larger context window
 - `gemma-7b-it` - Efficient instruction following
 
 **Gemini Models:**
-- `gemini-pro` - Advanced reasoning
-- `gemini-pro-vision` - Image understanding
+- `gemini-2.5-pro` - Advanced reasoning (stable)
+- `gemini-2.5-flash` - Fast multimodal flash model
 
 **HuggingFace Models:**
 - `microsoft/DialoGPT-medium` - Conversational

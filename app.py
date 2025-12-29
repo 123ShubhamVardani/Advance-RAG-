@@ -11,6 +11,11 @@ import traceback
 from pathlib import Path
 from logger import logger
 from typing import Optional, Union, Any
+from memory import MemoryManager
+from auth import init_admin_session, is_admin_authenticated, show_admin_login, admin_logout
+from ui_theme import apply_jarvis_theme, render_central_sphere, render_loading_animation
+from multi_lang import get_lang_manager, detect_language, translate_text
+from knowledge_base import get_kb_manager, KBDocument
 
 # Try to use Windows certificate store for Requests (corporate CA support)
 try:
@@ -196,6 +201,79 @@ try:
                     raise
                 return out
 
+        # Minimal HuggingFace adapter to provide a `.invoke` / callable
+        # compatible object that returns `.content` strings. This prefers
+        # the newer `InferenceClient` (router.huggingface.co) and falls back
+        # to the legacy `InferenceApi` when necessary. Implemented lazily
+        # to avoid import-time dependency errors.
+        class HuggingFaceAdapter:
+            def __init__(self, token: str, model: str, base_url: Optional[str] = None):
+                self.token = token
+                self.model = model
+                self.base_url = base_url or "https://router.huggingface.co"
+
+            def __call__(self, prompt: str, **kwargs):
+                return self.invoke(prompt, **kwargs)
+
+            def invoke(self, prompt: str, **kwargs):
+                # Try InferenceClient first
+                try:
+                    from huggingface_hub import InferenceClient
+                    client = InferenceClient(token=self.token, base_url=self.base_url)
+                    # Prefer text_generation helper if available
+                    if hasattr(client, "text_generation"):
+                        try:
+                            resp = client.text_generation(model=self.model, inputs=prompt, **({} if not kwargs else kwargs))
+                        except Exception:
+                            # Some clients return a generator/list; try generic request
+                            resp = client.request(model=self.model, inputs=prompt)
+                    else:
+                        # Generic request helpers vary by version
+                        if hasattr(client, "request"):
+                            resp = client.request(model=self.model, inputs=prompt)
+                        elif hasattr(client, "post"):
+                            resp = client.post(model=self.model, inputs=prompt)
+                        else:
+                            raise RuntimeError("InferenceClient lacks request helpers")
+
+                    # Parse response: could be list/dict/object
+                    text = None
+                    if isinstance(resp, list) and resp:
+                        first = resp[0]
+                        text = getattr(first, 'generated_text', None) or (first.get('generated_text') if isinstance(first, dict) else None) or str(first)
+                    elif isinstance(resp, dict):
+                        text = resp.get('generated_text') or resp.get('text') or str(resp)
+                    else:
+                        text = str(resp)
+
+                    return type('R', (), {'content': text})()
+                except Exception:
+                    # Fallback to legacy InferenceApi
+                    try:
+                        from huggingface_hub import InferenceApi
+                        client2 = InferenceApi(repo_id=self.model, token=self.token)
+                        try:
+                            resp = client2(inputs=prompt, raw_response=True)
+                            try:
+                                data = resp.json()
+                            except Exception:
+                                data = None
+                        except TypeError:
+                            resp = client2(inputs=prompt)
+                            data = resp if isinstance(resp, dict) else None
+
+                        sample_text = None
+                        if isinstance(data, dict):
+                            sample_text = data.get('generated_text') or data.get('text') or data.get('outputs') or str(data)
+                        elif isinstance(resp, dict):
+                            sample_text = resp.get('generated_text') or resp.get('text') or str(resp)
+                        else:
+                            sample_text = str(data or resp)
+
+                        return type('R', (), {'content': sample_text})()
+                    except Exception as e:
+                        raise
+
     except Exception:
         _groq_client = None
         GROQ_PY_AVAILABLE = False
@@ -234,30 +312,32 @@ except ImportError as e:
     LANGCHAIN_AVAILABLE = False
 
 # Voice imports with error handling
+VOICE_AVAILABLE = False
+MICROPHONE_AVAILABLE = False
+gTTS = None
+sr = None
+BytesIO = None
+wave = None
+
+# Try to import gTTS for text-to-speech
 try:
     from gtts import gTTS
-    import speech_recognition as sr
     from io import BytesIO
-    import wave
     VOICE_AVAILABLE = True
-    MICROPHONE_AVAILABLE = True
-except ImportError as e:
-    # Voice dependencies missing — create placeholders so module imports.
-    VOICE_AVAILABLE = False
-    MICROPHONE_AVAILABLE = False
+except ImportError:
     gTTS = None
-    sr = None
     BytesIO = None
+
+# Try to import speech_recognition for microphone (requires PyAudio on some systems)
+try:
+    import speech_recognition as sr
+    import wave
+    MICROPHONE_AVAILABLE = True
+except ImportError:
+    # PyAudio or speech_recognition not available
+    sr = None
     wave = None
-    # Try best-effort: TTS may still be available even if speech_recognition is not
-    if "speech_recognition" not in str(e):
-        try:
-            from gtts import gTTS
-            from io import BytesIO
-            VOICE_AVAILABLE = True
-        except Exception:
-            gTTS = None
-            BytesIO = None
+    MICROPHONE_AVAILABLE = False
 
 # === Optional OCR / document parsing tools (best-effort imports) ===
 try:
@@ -302,7 +382,14 @@ def _ocr_image_bytes(raw_bytes, langs=None):
     """Extract text from image bytes using EasyOCR (preferred) then pytesseract fallback.
     Returns the extracted Unicode text.
     """
-    langs = langs or _OCR_LANGS
+    # Allow runtime override via Streamlit session state if available
+    try:
+        if 'ocr_langs_text' in st.session_state and st.session_state.get('ocr_langs_text'):
+            langs = [l.strip() for l in st.session_state.get('ocr_langs_text', '').split(',') if l.strip()]
+        else:
+            langs = langs or _OCR_LANGS
+    except Exception:
+        langs = langs or _OCR_LANGS
     text_parts = []
     # Try EasyOCR first
     if EASYOCR_AVAILABLE:
@@ -433,6 +520,18 @@ class APIConfig:
         return status
 
 config = APIConfig()
+
+# === Memory Management (A.K.A.S.H.A. Long-Term Memory) ===
+memory_manager = MemoryManager()
+"""Global MemoryManager instance for storing and retrieving conversation memories.
+Used to augment chat prompts with relevant past context (RAG-style).
+"""
+
+# === Knowledge Base Management ===
+kb_manager = get_kb_manager()
+"""Global KnowledgeBaseManager instance for knowledge base operations.
+Only admins can modify KB; everyone can search it.
+"""
 
 # === Avatar Management ===
 class AvatarManager:
@@ -786,6 +885,34 @@ def create_llm_with_fallback(provider, model_name=None, force_offline=False):
     
     return None
 
+
+@st.cache_resource
+def get_groq_models():
+    """Return a list of available Groq model ids. Cached as a resource.
+    Returns an empty list if Groq client or key is unavailable.
+    """
+    try:
+        if not config.has_groq:
+            return []
+        # Attempt to use the official groq client if available
+        try:
+            import groq as _g
+            client = _g.Client(api_key=config.groq_key)
+            if hasattr(client, 'models') and hasattr(client.models, 'list'):
+                ml = client.models.list()
+                return [getattr(m, 'id', str(m)) for m in getattr(ml, 'data', [])]
+        except Exception:
+            # Fall back: try ChatGroq via langchain if available
+            try:
+                if ChatGroq is not None:
+                    # ChatGroq may not expose listing; return common defaults
+                    return ["llama-3.1-8b-instant", "qwen/qwen3-32b", "llama-3.3-70b-versatile"]
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return []
+
 def try_create_llm(provider, model_name=None):
     """Try to create LLM for specific provider"""
     try:
@@ -850,20 +977,69 @@ def try_create_llm(provider, model_name=None):
                         return ChatGroq(config.groq_key, model, temperature=0.7, max_tokens=2048)
         
         elif provider == "gemini" and config.has_google and ChatGoogleGenerativeAI is not None:
-            model = model_name or "gemini-pro"
-            return ChatGoogleGenerativeAI(
-                model=model,
-                google_api_key=config.google_key,
-                temperature=0.7
-            )
+            # Try a short list of Gemini models (prefer env override). Projects
+            # can have zero free-tier quota for some models which returns 429;
+            # we attempt smaller/older models until one succeeds.
+            model_env = os.getenv("GOOGLE_MODEL")
+            candidates = [m for m in ([model_env] if model_env else []) + [
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-1.5-pro",
+                "gemini-1.0",
+            ] if m]
+
+            last_exc = None
+            for choice in candidates:
+                try:
+                    # instantiate and do a lightweight invocation to check quota/access
+                    llm = ChatGoogleGenerativeAI(model=choice, google_api_key=config.google_key, temperature=0.7)
+                    try:
+                        # small probe to ensure model responds (may raise quota errors)
+                        probe = getattr(llm, 'invoke', None)
+                        if callable(probe):
+                            _resp = llm.invoke("Hi")
+                            # Some clients return objects with .content
+                            sample = getattr(_resp, 'content', None) or str(_resp)
+                        # If probe didn't raise, return this llm instance
+                        return llm
+                    except Exception as e:
+                        last_exc = e
+                        # try next candidate
+                        continue
+                except Exception as e:
+                    last_exc = e
+                    continue
+
+            # If no candidate worked, warn and fall back to the env/default model
+            try:
+                logger.warning("No Gemini model candidates responded successfully", error=str(last_exc))
+            except Exception:
+                pass
+            st.warning("Gemini unavailable: no candidate model responded. Check billing/quota or set GOOGLE_MODEL in .env")
+            return None
         
-        elif provider == "huggingface" and config.has_huggingface and HuggingFaceHub is not None:
+        elif provider == "huggingface" and config.has_huggingface:
             model = model_name or "microsoft/DialoGPT-medium"
-            return HuggingFaceHub(
-                repo_id=model,
-                huggingfacehub_api_token=config.huggingface_token,
-                model_kwargs={"temperature": 0.7, "max_length": 512}
-            )
+            # Prefer our adapter which uses huggingface_hub.InferenceClient (router) with a
+            # fallback to the legacy InferenceApi. If that fails, fall back to LangChain's
+            # HuggingFaceHub wrapper when available.
+            try:
+                return HuggingFaceAdapter(token=config.huggingface_token, model=model)
+            except Exception:
+                try:
+                    logger.warning("HuggingFaceAdapter failed; falling back to HuggingFaceHub wrapper")
+                except Exception:
+                    pass
+                if HuggingFaceHub is not None:
+                    try:
+                        return HuggingFaceHub(
+                            repo_id=model,
+                            huggingfacehub_api_token=config.huggingface_token,
+                            model_kwargs={"temperature": 0.7, "max_length": 512}
+                        )
+                    except Exception:
+                        pass
+                return None
         
         return None
         
@@ -1398,17 +1574,19 @@ def create_voice_input_component():
 
 # === Main App Interface ===
 def setup_page():
-    """Configure Streamlit page"""
+    """Configure Streamlit page with JARVIS theme"""
     st.set_page_config(
-        page_title="🤖 AI Chatbot",
+        page_title="🤖 A.K.A.S.H.A.",
         page_icon="🤖",
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    # Apply JARVIS-inspired dark theme with cyan/gold colors
+    apply_jarvis_theme()
 
 def show_welcome_screen():
     """Show welcome and setup screen"""
-    st.title("🤖 Welcome to AI Chatbot")
+    st.title("🤖 Welcome to A.K.A.S.H.A.")
     
     if not config.available_providers:
         st.warning("⚠️ No AI providers configured!")
@@ -1451,9 +1629,33 @@ def show_welcome_screen():
             st.metric("Voice Features", "Available" if VOICE_AVAILABLE else "Limited")
 
 def show_sidebar():
-    """Enhanced sidebar with better organization"""
+    """Enhanced sidebar with better organization, language support, and admin gating"""
     with st.sidebar:
-        st.title("🤖 AI Chatbot")
+        st.title("🤖 A.K.A.S.H.A.")
+
+        # Language Selection (always visible)
+        st.subheader("🌍 Language")
+        lang_options = {
+            "English": "en",
+            "हिंदी": "hi",
+            "தமிழ்": "ta",
+            "తెలుగు": "te",
+            "ಕನ್ನಡ": "kn",
+            "മലയാളം": "ml",
+            "বাংলা": "bn",
+            "मराठी": "mr",
+            "ગુજરાતી": "gu",
+            "ਪੰਜਾਬੀ": "pa",
+        }
+        selected_lang = st.selectbox(
+            "Select language:",
+            list(lang_options.keys()),
+            index=0,
+            help="Choose your preferred language for interaction"
+        )
+        st.session_state.current_language = lang_options[selected_lang]
+
+        st.divider()
 
         # Provider selection
         if config.available_providers:
@@ -1465,15 +1667,18 @@ def show_sidebar():
 
             # Model selection
             if provider == "groq":
-                model = st.selectbox("Model:", [
-                    "llama-3.1-8b-instant",
-                    "qwen/qwen3-32b",
-                    "gemma-7b-it"
-                ])
+                # Populate model list dynamically from Groq if possible
+                try:
+                    groq_models = get_groq_models()
+                except Exception:
+                    groq_models = []
+                default_models = ["llama-3.1-8b-instant", "qwen/qwen3-32b", "gemma-7b-it"]
+                model_choices = groq_models if groq_models else default_models
+                model = st.selectbox("Model:", model_choices)
             elif provider == "gemini":
                 model = st.selectbox("Model:", [
-                    "gemini-pro",
-                    "gemini-pro-vision"
+                    "gemini-2.5-pro",
+                    "gemini-2.5-flash"
                 ])
             else:
                 model = st.selectbox("Model:", [
@@ -1553,6 +1758,12 @@ def show_sidebar():
             help="Enable voice input and text-to-speech"
         )
 
+        # OCR language selector (comma-separated)
+        st.caption("OCR Languages (comma-separated, e.g. 'en,hi,ta')")
+        ocr_text = st.text_input("OCR Languages:", value=st.session_state.get('ocr_langs_text', ','.join(_OCR_LANGS)))
+        # Store in session state (keeps value across reruns)
+        st.session_state['ocr_langs_text'] = ocr_text
+
         max_tokens = st.slider(
             "Response Length:",
             100, 2000, 500,
@@ -1598,183 +1809,339 @@ def show_sidebar():
 
         st.divider()
 
-        # Diagnostics
-        st.subheader("🩺 Diagnostics")
-        # Log level control (best-effort; logger levels are set at init)
-        log_level = st.selectbox("Log level", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
-        try:
-            # Update the underlying logger if possible
-            logger.logger.setLevel(log_level)
-        except Exception:
-            pass
+        # Admin Panel (Gated)
+        st.subheader("🔐 Admin Panel")
+        if is_admin_authenticated():
+            col_admin1, col_admin2 = st.columns([3, 1])
+            with col_admin1:
+                st.success("✅ Admin authenticated")
+            with col_admin2:
+                if st.button("🔒 Logout"):
+                    admin_logout()
+            
+            # Diagnostics (admin only)
+            st.subheader("🩺 Diagnostics")
+            # Log level control (best-effort; logger levels are set at init)
+            log_level = st.selectbox("Log level", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
+            try:
+                # Update the underlying logger if possible
+                logger.logger.setLevel(log_level)
+            except Exception:
+                pass
 
-        # Connectivity tuning
-        st.caption("Connection test settings")
-        col_ct1, col_ct2, col_ct3 = st.columns(3)
-        with col_ct1:
-            timeout_val = st.number_input("Timeout (s)", min_value=1.0, max_value=30.0, value=float(os.getenv("CONNECTION_TEST_TIMEOUT", "5")), step=0.5, help="Per-attempt timeout")
-        with col_ct2:
-            retries_val = st.number_input("Retries", min_value=0, max_value=5, value=int(os.getenv("CONNECTION_TEST_RETRIES", "2")), step=1, help="Additional retries after first")
-        with col_ct3:
-            backoff_val = st.number_input("Backoff (s)", min_value=0.1, max_value=5.0, value=float(os.getenv("CONNECTION_TEST_BACKOFF", "0.5")), step=0.1, help="Initial exponential backoff")
+            # Connectivity tuning
+            st.caption("Connection test settings")
+            col_ct1, col_ct2, col_ct3 = st.columns(3)
+            with col_ct1:
+                timeout_val = st.number_input("Timeout (s)", min_value=1.0, max_value=30.0, value=float(os.getenv("CONNECTION_TEST_TIMEOUT", "5")), step=0.5, help="Per-attempt timeout")
+            with col_ct2:
+                retries_val = st.number_input("Retries", min_value=0, max_value=5, value=int(os.getenv("CONNECTION_TEST_RETRIES", "2")), step=1, help="Additional retries after first")
+            with col_ct3:
+                backoff_val = st.number_input("Backoff (s)", min_value=0.1, max_value=5.0, value=float(os.getenv("CONNECTION_TEST_BACKOFF", "0.5")), step=0.1, help="Initial exponential backoff")
 
-        # Apply settings to environment for current process (ephemeral)
-        if st.button("Apply test settings"):
-            os.environ["CONNECTION_TEST_TIMEOUT"] = str(timeout_val)
+            # Apply settings to environment for current process (ephemeral)
+            if st.button("Apply test settings"):
+                os.environ["CONNECTION_TEST_TIMEOUT"] = str(timeout_val)
             os.environ["CONNECTION_TEST_RETRIES"] = str(retries_val)
             os.environ["CONNECTION_TEST_BACKOFF"] = str(backoff_val)
             st.success("Updated connection test settings.")
 
-        # Show certificate override status and provide quick controls
-        st.caption("TLS trust configuration")
-        ca_bundle = os.getenv("REQUESTS_CA_BUNDLE")
-        ssl_cert_file = os.getenv("SSL_CERT_FILE")
-        st.text(f"REQUESTS_CA_BUNDLE = {ca_bundle or '(not set)'}")
-        st.text(f"SSL_CERT_FILE = {ssl_cert_file or '(not set)'}")
-        ca_col1, ca_col2 = st.columns(2)
-        with ca_col1:
-            if st.button("Use system trust (clear overrides)"):
-                # backup once per session
-                if "_ca_backup" not in st.session_state:
-                    st.session_state._ca_backup = {
-                        "REQUESTS_CA_BUNDLE": ca_bundle,
-                        "SSL_CERT_FILE": ssl_cert_file,
-                    }
+            # Show certificate override status and provide quick controls
+            st.caption("TLS trust configuration")
+            ca_bundle = os.getenv("REQUESTS_CA_BUNDLE")
+            ssl_cert_file = os.getenv("SSL_CERT_FILE")
+            st.text(f"REQUESTS_CA_BUNDLE = {ca_bundle or '(not set)'}")
+            st.text(f"SSL_CERT_FILE = {ssl_cert_file or '(not set)'}")
+            ca_col1, ca_col2 = st.columns(2)
+            with ca_col1:
+                if st.button("Use system trust (clear overrides)"):
+                    # backup once per session
+                    if "_ca_backup" not in st.session_state:
+                        st.session_state._ca_backup = {
+                            "REQUESTS_CA_BUNDLE": ca_bundle,
+                            "SSL_CERT_FILE": ssl_cert_file,
+                        }
+                    try:
+                        os.environ.pop("REQUESTS_CA_BUNDLE", None)
+                        os.environ.pop("SSL_CERT_FILE", None)
+                        st.success("Cleared CA overrides for this process. Re-check connectivity below.")
+                    except Exception as e:
+                        st.error(f"Could not clear overrides: {e}")
+            with ca_col2:
+                if st.button("Restore overrides"):
+                    try:
+                        backup = st.session_state.get("_ca_backup")
+                        if backup:
+                            if backup.get("REQUESTS_CA_BUNDLE"):
+                                os.environ["REQUESTS_CA_BUNDLE"] = backup["REQUESTS_CA_BUNDLE"]
+                            else:
+                                os.environ.pop("REQUESTS_CA_BUNDLE", None)
+                            if backup.get("SSL_CERT_FILE"):
+                                os.environ["SSL_CERT_FILE"] = backup["SSL_CERT_FILE"]
+                            else:
+                                os.environ.pop("SSL_CERT_FILE", None)
+                            st.success("Restored previous CA override values.")
+                        else:
+                            st.info("No backup available in this session.")
+                    except Exception as e:
+                        st.error(f"Could not restore overrides: {e}")
+
+            if st.button("🔎 Re-check connectivity (verbose)"):
+                with st.spinner("Testing connection..."):
+                    ok = mode_manager.test_connection()
+                    st.success("Online") if ok else st.error("Offline")
+
+            # Inline validation & self-test tools
+            st.caption("Validation & provider self-test")
+            col_v1, col_v2, col_v3 = st.columns(3)
+            with col_v1:
+                run_validator = st.button("🧪 Validate", help="Run project validator (compiles, imports, connectivity)")
+            with col_v2:
+                run_selftest = st.button("🧬 Self-Test", help="Run provider self-test (instantiate each provider)")
+            with col_v3:
+                run_both = st.button("🧪+🧬 Both", help="Run validator + self-test")
+
+            def _run_validator():
+                import subprocess
+                import json
+                import sys
                 try:
-                    os.environ.pop("REQUESTS_CA_BUNDLE", None)
-                    os.environ.pop("SSL_CERT_FILE", None)
-                    st.success("Cleared CA overrides for this process. Re-check connectivity below.")
+                    result = subprocess.run([sys.executable, "-X", "utf8", "tools/validate_project.py"], capture_output=True, text=True, timeout=120)
+                    out = result.stdout.strip()
+                    # Attempt parse; fallback to raw text
+                    try:
+                        parsed = json.loads(out)
+                    except Exception:
+                        parsed = {"raw": out[-5000:]}
+                    if result.returncode != 0:
+                        parsed["returncode"] = str(result.returncode)
+                    return parsed
                 except Exception as e:
-                    st.error(f"Could not clear overrides: {e}")
-        with ca_col2:
-            if st.button("Restore overrides"):
+                    return {"error": str(e)}
+
+            def _run_selftest():
+                import subprocess
+                import json
+                import sys
                 try:
-                    backup = st.session_state.get("_ca_backup")
-                    if backup:
-                        if backup.get("REQUESTS_CA_BUNDLE"):
-                            os.environ["REQUESTS_CA_BUNDLE"] = backup["REQUESTS_CA_BUNDLE"]
+                    result = subprocess.run([sys.executable, "-X", "utf8", "tools/self_test.py"], capture_output=True, text=True, timeout=90)
+                    out = result.stdout.strip()
+                    try:
+                        parsed = json.loads(out)
+                    except Exception:
+                        parsed = {"raw": out[-4000:]}
+                    if result.returncode != 0:
+                        parsed["returncode"] = str(result.returncode)
+                    return parsed
+                except Exception as e:
+                    return {"error": str(e)}
+
+            if run_validator or run_both:
+                with st.spinner("Running validator..."):
+                    val = _run_validator()
+                if not val.get("error"):
+                    st.success("Validator complete")
+                else:
+                    st.error("Validator error")
+                with st.expander("Validator Output", expanded=False):
+                    st.json(val)
+
+            if run_selftest or run_both:
+                with st.spinner("Running provider self-test..."):
+                    ste = _run_selftest()
+                if not ste.get("error"):
+                    st.success("Self-test complete")
+                else:
+                    st.error("Self-test error")
+                with st.expander("Self-Test Output", expanded=False):
+                    st.json(ste)
+
+            # Show last diagnostics summary
+            diag = st.session_state.get("connection_diagnostics")
+            if diag:
+                col_diag1, col_diag2 = st.columns([4, 1])
+                with col_diag1:
+                    with st.expander("Last connection diagnostics", expanded=False):
+                        st.json({
+                            k: diag[k] for k in [
+                                "provider", "final", "started"
+                            ] if k in diag
+                        })
+                        st.write(f"Attempts: {len(diag.get('attempts', []))}")
+                        # Show condensed error classifications
+                        classes = {}
+                        for a in diag.get("attempts", []):
+                            c = a.get("classification")
+                            if c:
+                                classes[c] = classes.get(c, 0) + 1
+                        if classes:
+                            st.write("Error classes:", classes)
+                        if diag.get("secondary"):
+                            sec = diag["secondary"]
+                            st.write("Secondary (system trust) retry:")
+                            st.json(sec)
+                with col_diag2:
+                    if st.button("🗑️ Clear", help="Delete connection diagnostics logs", key="clear_diag"):
+                        st.session_state.connection_diagnostics = None
+                        st.success("✅ Diagnostics cleared")
+                        st.rerun()
+
+            # Show last lines of the latest log
+            log_file = _latest_log_path()
+            st.caption(f"Log file: {log_file.name}")
+            try:
+                if log_file.exists():
+                    lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]
+                    st.code("\n".join(lines) if lines else "(log empty)", language="text")
+                else:
+                    st.info("No log file yet. Interact with the app to generate logs.")
+            except Exception as e:
+                st.warning(f"Could not read log: {e}")
+            
+                st.divider()
+            
+            # === KNOWLEDGE BASE MANAGEMENT (ADMIN ONLY) ===
+            st.subheader("📚 Knowledge Base Management")
+            
+            kb_stats = kb_manager.get_stats()
+            col_kb1, col_kb2, col_kb3 = st.columns(3)
+            with col_kb1:
+                st.metric("Total Documents", kb_stats['total_documents'])
+            with col_kb2:
+                st.metric("Categories", kb_stats['categories_count'])
+            with col_kb3:
+                st.metric("Total Text", f"{kb_stats['total_characters']} chars")
+            
+            # Add new KB document
+            st.caption("➕ Add Document")
+            kb_title = st.text_input("Document Title", placeholder="e.g., 'Python Setup Guide'")
+            kb_category = st.selectbox(
+                "Category",
+                ["FAQ", "API", "Tutorial", "Policy", "Troubleshooting", "General"],
+                help="Document category for organization"
+            )
+            
+            # Create tabs for text input or file upload
+            tab_text, tab_file = st.tabs(["📝 Paste Text", "📤 Upload File"])
+            
+            kb_content = None
+            with tab_text:
+                kb_content = st.text_area(
+                    "Content",
+                    placeholder="Paste document content here...",
+                    height=150,
+                    key="kb_text_input"
+                )
+            
+            with tab_file:
+                kb_file = st.file_uploader(
+                    "Upload document (PDF or TXT)",
+                    type=["pdf", "txt", "md"],
+                    help="Upload PDF, TXT, or Markdown files",
+                    key="kb_file_upload"
+                )
+                if kb_file:
+                    try:
+                        if kb_file.type == "application/pdf":
+                            try:
+                                import PyPDF2
+                                pdf_reader = PyPDF2.PdfReader(kb_file)
+                                kb_content = "\n".join([page.extract_text() for page in pdf_reader.pages])
+                                st.success(f"✅ PDF loaded: {len(kb_content)} characters")
+                            except ImportError:
+                                st.error("❌ PyPDF2 not installed. Use text input instead.")
                         else:
-                            os.environ.pop("REQUESTS_CA_BUNDLE", None)
-                        if backup.get("SSL_CERT_FILE"):
-                            os.environ["SSL_CERT_FILE"] = backup["SSL_CERT_FILE"]
-                        else:
-                            os.environ.pop("SSL_CERT_FILE", None)
-                        st.success("Restored previous CA override values.")
+                            kb_content = kb_file.read().decode('utf-8')
+                            st.success(f"✅ File loaded: {len(kb_content)} characters")
+                    except Exception as e:
+                        st.error(f"❌ Error reading file: {e}")
+            
+            kb_tags = st.multiselect(
+                "Tags",
+                ["python", "api", "setup", "error", "configuration", "security", "docs", "howto"],
+                help="Select relevant tags for better search"
+            )
+            
+            if st.button("➕ Add to Knowledge Base", key="add_kb_doc"):
+                if kb_title and kb_content:
+                    doc_id = kb_manager.add_from_text(
+                        title=kb_title,
+                        content=kb_content,
+                        category=kb_category,
+                        tags=kb_tags
+                    )
+                    st.success(f"✅ Document added! (ID: {doc_id})")
+                else:
+                    st.error("⚠️ Please enter both title and content")
+            
+            st.divider()
+            
+            # List and manage existing KB documents
+            st.caption("📖 Manage Documents")
+            kb_filter_category = st.selectbox(
+                "Filter by category",
+                ["All"] + kb_manager.store.get_categories(),
+                key="kb_filter_cat"
+            )
+            
+            category_filter = None if kb_filter_category == "All" else kb_filter_category
+            kb_docs = kb_manager.list_all(category=category_filter)
+            
+            if kb_docs:
+                for doc in kb_docs:
+                    col_d1, col_d2, col_d3 = st.columns([2, 1, 1])
+                    with col_d1:
+                        st.write(f"**{doc['title']}**")
+                        st.caption(f"📁 {doc['category']} | 🏷️ {', '.join(doc['tags']) if doc['tags'] else 'No tags'}")
+                    with col_d2:
+                        if st.button("🔍 View", key=f"view_{doc['id']}"):
+                            kb_doc = kb_manager.store.get_document(doc['id'])
+                            if kb_doc:
+                                st.info(f"**{kb_doc.title}**\n\n{kb_doc.content[:500]}...")
+                    with col_d3:
+                        if st.button("🗑️ Delete", key=f"del_{doc['id']}"):
+                            if kb_manager.delete(doc['id']):
+                                st.success("Document deleted!")
+                                st.rerun()
+                            else:
+                                st.error("Failed to delete")
+            else:
+                st.info("No documents in this category yet")
+            
+            st.divider()
+            
+            # KB Backup/Export
+            col_backup1, col_backup2 = st.columns(2)
+            with col_backup1:
+                if st.button("💾 Save KB Backup"):
+                    if kb_manager.store.save_to_disk():
+                        st.success("✅ KB backed up to kb/kb_backup.json")
                     else:
-                        st.info("No backup available in this session.")
-                except Exception as e:
-                    st.error(f"Could not restore overrides: {e}")
-
-        if st.button("🔎 Re-check connectivity (verbose)"):
-            with st.spinner("Testing connection..."):
-                ok = mode_manager.test_connection()
-                st.success("Online") if ok else st.error("Offline")
-
-        # Inline validation & self-test tools
-        st.caption("Validation & provider self-test")
-        col_v1, col_v2, col_v3 = st.columns(3)
-        with col_v1:
-            run_validator = st.button("🧪 Validate", help="Run project validator (compiles, imports, connectivity)")
-        with col_v2:
-            run_selftest = st.button("🧬 Self-Test", help="Run provider self-test (instantiate each provider)")
-        with col_v3:
-            run_both = st.button("🧪+🧬 Both", help="Run validator + self-test")
-
-        def _run_validator():
-            import subprocess
-            import json
-            import sys
-            try:
-                result = subprocess.run([sys.executable, "-X", "utf8", "tools/validate_project.py"], capture_output=True, text=True, timeout=120)
-                out = result.stdout.strip()
-                # Attempt parse; fallback to raw text
-                try:
-                    parsed = json.loads(out)
-                except Exception:
-                    parsed = {"raw": out[-5000:]}
-                if result.returncode != 0:
-                    parsed["returncode"] = str(result.returncode)
-                return parsed
-            except Exception as e:
-                return {"error": str(e)}
-
-        def _run_selftest():
-            import subprocess
-            import json
-            import sys
-            try:
-                result = subprocess.run([sys.executable, "-X", "utf8", "tools/self_test.py"], capture_output=True, text=True, timeout=90)
-                out = result.stdout.strip()
-                try:
-                    parsed = json.loads(out)
-                except Exception:
-                    parsed = {"raw": out[-4000:]}
-                if result.returncode != 0:
-                    parsed["returncode"] = str(result.returncode)
-                return parsed
-            except Exception as e:
-                return {"error": str(e)}
-
-        if run_validator or run_both:
-            with st.spinner("Running validator..."):
-                val = _run_validator()
-            if not val.get("error"):
-                st.success("Validator complete")
-            else:
-                st.error("Validator error")
-            with st.expander("Validator Output", expanded=False):
-                st.json(val)
-
-        if run_selftest or run_both:
-            with st.spinner("Running provider self-test..."):
-                ste = _run_selftest()
-            if not ste.get("error"):
-                st.success("Self-test complete")
-            else:
-                st.error("Self-test error")
-            with st.expander("Self-Test Output", expanded=False):
-                st.json(ste)
-
-        # Show last diagnostics summary
-        diag = st.session_state.get("connection_diagnostics")
-        if diag:
-            with st.expander("Last connection diagnostics", expanded=False):
-                st.json({
-                    k: diag[k] for k in [
-                        "provider", "final", "started"
-                    ] if k in diag
-                })
-                st.write(f"Attempts: {len(diag.get('attempts', []))}")
-                # Show condensed error classifications
-                classes = {}
-                for a in diag.get("attempts", []):
-                    c = a.get("classification")
-                    if c:
-                        classes[c] = classes.get(c, 0) + 1
-                if classes:
-                    st.write("Error classes:", classes)
-                if diag.get("secondary"):
-                    sec = diag["secondary"]
-                    st.write("Secondary (system trust) retry:")
-                    st.json(sec)
-
-        # Show last lines of the latest log
-        log_file = _latest_log_path()
-        st.caption(f"Log file: {log_file.name}")
-        try:
-            if log_file.exists():
-                lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]
-                st.code("\n".join(lines) if lines else "(log empty)", language="text")
-            else:
-                st.info("No log file yet. Interact with the app to generate logs.")
-        except Exception as e:
-            st.warning(f"Could not read log: {e}")
+                        st.error("❌ Backup failed")
+            
+            with col_backup2:
+                if st.button("🔄 Load KB from Backup"):
+                    if kb_manager.store.load_from_disk():
+                        st.success("✅ KB loaded from backup")
+                        st.rerun()
+                    else:
+                        st.error("❌ No backup found or load failed")
+        else:
+            # Not authenticated - show login prompt
+            show_admin_login()
 
     return provider, model, uploaded_file, use_voice, max_tokens
+
 
 def main():
     """Main application"""
     setup_page()
+    
+    # Initialize admin authentication
+    init_admin_session()
+    
+    # Initialize language manager
+    lang_manager = get_lang_manager()
     
     # Initialize session state
     if "messages" not in st.session_state:
@@ -1783,6 +2150,8 @@ def main():
         st.session_state.doc_data = None
     if "show_welcome" not in st.session_state:
         st.session_state.show_welcome = True
+    if "current_language" not in st.session_state:
+        st.session_state.current_language = "en"
     
     # Show sidebar
     provider, model, uploaded_file, use_voice, max_tokens = show_sidebar()
@@ -1795,7 +2164,11 @@ def main():
             st.rerun()
         return
     
-    st.title("💬 Chat")
+    st.title("💬 A.K.A.S.H.A. Chat Interface")
+    
+    # Show spinning sphere if no messages yet (welcome state)
+    if not st.session_state.messages:
+        render_central_sphere()
     
     # Process uploaded document
     if uploaded_file and uploaded_file != st.session_state.get("last_file"):
@@ -1844,6 +2217,18 @@ def main():
         with st.chat_message("user", avatar=user_avatar):
             st.markdown(prompt)
         
+        # Store user message in memory for future retrieval
+        try:
+            memory_manager.insert_memory(
+                content=prompt,
+                metadata={"role": "user", "timestamp": datetime.now().isoformat()}
+            )
+        except Exception as e:
+            try:
+                logger.debug("Memory insert failed", error=str(e))
+            except Exception:
+                pass
+        
         # Generate response
         with st.chat_message("assistant", avatar=bot_avatar):
             with st.spinner("🤔 Thinking..."):
@@ -1868,7 +2253,16 @@ def main():
                         st.caption("📚 From cache")
                         
                     else:
-                        # Create LLM with smart fallback
+                        # Search Knowledge Base first
+                        kb_context = ""
+                        kb_results = kb_manager.search(prompt, top_k=3)
+                        if kb_results:
+                            kb_context = "📚 **Knowledge Base Results:**\n\n"
+                            for i, result in enumerate(kb_results, 1):
+                                kb_context += f"{i}. **{result['title']}** (Relevance: {result['relevance']})\n"
+                                kb_context += f"   {result['content'][:150]}...\n\n"
+                        
+                        # Create LLM with smart auto-fallback
                         force_offline = (provider == "offline" or mode_manager.get_current_mode() == "offline")
                         llm = create_llm_with_fallback(provider, model, force_offline)
                         
@@ -1881,7 +2275,7 @@ def main():
                             if not force_offline:
                                 st.info("🔄 Using offline mode")
                         
-                        # Generate response
+                        # Generate response with augmented context
                         if st.session_state.doc_data:
                             # Include document search
                             doc_results = search_documents(prompt, st.session_state.doc_data)
@@ -1890,10 +2284,27 @@ def main():
                                 response = f"{get_response_text(llm.invoke(prompt))}\n\n📄 **From your document:**\n{doc_results}"
                             else:
                                 enhanced_prompt = f"{prompt}\n\nRelevant document content:\n{doc_results}"
+                                if kb_context:
+                                    enhanced_prompt += f"\n\n{kb_context}"
                                 response = get_response_text(llm.invoke(enhanced_prompt))
                         else:
-                            # Regular response
-                            response = get_response_text(llm.invoke(prompt))
+                            # Retrieve relevant memories (A.K.A.S.H.A.'s long-term context)
+                            try:
+                                retrieved_memories = memory_manager.query(prompt, top_k=3)
+                                memory_context = ""
+                                if retrieved_memories:
+                                    memory_context = "\n\nRelevant past context:\n" + "\n".join(
+                                        [f"• {m.content}" for m in retrieved_memories[:3]]
+                                    )
+                            except Exception:
+                                memory_context = ""
+                            
+                            # Augment prompt with KB context and memory (RAG-style)
+                            final_prompt = prompt + memory_context
+                            if kb_context:
+                                final_prompt += f"\n\n{kb_context}"
+                            
+                            response = get_response_text(llm.invoke(final_prompt))
                         
                         # Display response
                         st.markdown(response)
@@ -1913,6 +2324,18 @@ def main():
                         "content": response,
                         "cached": bool(cached)
                     })
+                    
+                    # Store response in memory for future retrieval
+                    try:
+                        memory_manager.insert_memory(
+                            content=response,
+                            metadata={"role": "assistant", "timestamp": datetime.now().isoformat()}
+                        )
+                    except Exception as e:
+                        try:
+                            logger.debug("Memory insert (response) failed", error=str(e))
+                        except Exception:
+                            pass
                     
                 except Exception as e:
                     error_response = f"I apologize, but I encountered an error: {str(e)}"

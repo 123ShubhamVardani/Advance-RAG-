@@ -178,15 +178,15 @@ def create_llm(provider, model_name=None):
         
     try:
         if provider == "groq" and config.has_groq:
-            model = model_name or "llama3-8b-8192"
+            model = model_name or "llama-3.1-8b-instant"
             if ChatGroq is None:
                 st.error("Groq integration is not available (langchain_groq missing). Please install required package.")
                 return None
             # Migration map for deprecated Groq model IDs
             groq_migration_map = {
-                "llama3-8b-8192": "llama-3.1-8b-instant",
-                "llama3-70b-8192": "llama-3.3-70b-versatile",
-                "distil-whisper-large-v3-en": "whisper-large-v3-turbo",
+                "llama-3.1-8b-instant": "llama-3.1-8b-instant",
+                "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
+                "whisper-large-v3-turbo": "whisper-large-v3-turbo",
             }
             target_model = groq_migration_map.get(model, model)
             if target_model != model:
@@ -532,8 +532,8 @@ def show_sidebar():
             # Model selection
             if provider == "groq":
                 model = st.selectbox("Model:", [
-                    "llama3-8b-8192",
-                    "mixtral-8x7b-32768", 
+                    "llama-3.1-8b-instant",
+                    "qwen/qwen3-32b", 
                     "gemma-7b-it"
                 ])
             elif provider == "gemini":

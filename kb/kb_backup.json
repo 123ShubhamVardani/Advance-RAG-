@@ -1,0 +1,117 @@
+{
+  "documents": [
+    {
+      "id": "16becdd95b0c",
+      "title": "Python Setup Guide",
+      "content": "To set up Python on your system, download the latest version from python.org. Follow the installation wizard and ensure to add Python to PATH during installation. Verify installation with 'python --version'.",
+      "category": "Tutorial",
+      "tags": [
+        "python",
+        "setup",
+        "howto"
+      ],
+      "created_at": 1766482239.070709,
+      "updated_at": 1766482239.07071,
+      "metadata": {}
+    },
+    {
+      "id": "570cdc84d957",
+      "title": "Common API Errors",
+      "content": "401 Unauthorized: Invalid API key. Check your credentials in .env file. 429 Too Many Requests: Rate limit exceeded. Wait before retrying. 500 Internal Server Error: Server issue, try again later.",
+      "category": "Troubleshooting",
+      "tags": [
+        "api",
+        "error",
+        "debugging"
+      ],
+      "created_at": 1766482239.071946,
+      "updated_at": 1766482239.071947,
+      "metadata": {}
+    },
+    {
+      "id": "a2ff708f8ac4",
+      "title": "Security Best Practices",
+      "content": "Never commit API keys to version control. Use .env files and add them to .gitignore. Rotate keys regularly. Use environment variables for sensitive data. Enable two-factor authentication on all accounts.",
+      "category": "Policy",
+      "tags": [
+        "security",
+        "config",
+        "docs"
+      ],
+      "created_at": 1766482239.072507,
+      "updated_at": 1766482239.0725079,
+      "metadata": {}
+    },
+    {
+      "id": "4e5465caba6b",
+      "title": "Database Connection FAQ",
+      "content": "Q: How do I connect to PostgreSQL? A: Use psycopg2 library: import psycopg2; conn = psycopg2.connect(). Q: How to handle connection pooling? A: Use pgBouncer or sqlalchemy connection pools.",
+      "category": "FAQ",
+      "tags": [
+        "database",
+        "api",
+        "setup"
+      ],
+      "created_at": 1766482239.073096,
+      "updated_at": 1766482239.073096,
+      "metadata": {}
+    },
+    {
+      "id": "612116c286b8",
+      "title": "Python Setup Guide",
+      "content": "To set up Python on your system, download the latest version from python.org. Follow the installation wizard and ensure to add Python to PATH during installation. Verify installation with 'python --version'.",
+      "category": "Tutorial",
+      "tags": [
+        "python",
+        "setup",
+        "howto"
+      ],
+      "created_at": 1766482243.3292742,
+      "updated_at": 1766482243.3292742,
+      "metadata": {}
+    },
+    {
+      "id": "32ccde08621c",
+      "title": "Common API Errors",
+      "content": "401 Unauthorized: Invalid API key. Check your credentials in .env file. 429 Too Many Requests: Rate limit exceeded. Wait before retrying. 500 Internal Server Error: Server issue, try again later.",
+      "category": "Troubleshooting",
+      "tags": [
+        "api",
+        "error",
+        "debugging"
+      ],
+      "created_at": 1766482243.329775,
+      "updated_at": 1766482243.329775,
+      "metadata": {}
+    },
+    {
+      "id": "cff5aa63bbd5",
+      "title": "Security Best Practices",
+      "content": "Never commit API keys to version control. Use .env files and add them to .gitignore. Rotate keys regularly. Use environment variables for sensitive data. Enable two-factor authentication on all accounts.",
+      "category": "Policy",
+      "tags": [
+        "security",
+        "config",
+        "docs"
+      ],
+      "created_at": 1766482243.330427,
+      "updated_at": 1766482243.330427,
+      "metadata": {}
+    },
+    {
+      "id": "f4d6a4b7db3e",
+      "title": "Database Connection FAQ",
+      "content": "Q: How do I connect to PostgreSQL? A: Use psycopg2 library: import psycopg2; conn = psycopg2.connect(). Q: How to handle connection pooling? A: Use pgBouncer or sqlalchemy connection pools.",
+      "category": "FAQ",
+      "tags": [
+        "database",
+        "api",
+        "setup"
+      ],
+      "created_at": 1766482243.331224,
+      "updated_at": 1766482243.331224,
+      "metadata": {}
+    }
+  ],
+  "timestamp": 1766489694.4492958
+}

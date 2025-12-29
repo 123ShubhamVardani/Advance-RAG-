@@ -6,6 +6,10 @@ import os
 import json
 import time
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load .env file from project root
+load_dotenv()
 
 RESULT = {"started": datetime.utcnow().isoformat() + "Z", "providers": {}, "env": {}}
 
@@ -41,9 +45,41 @@ if OK_LANGCHAIN:
     if os.getenv("GOOGLE_API_KEY"):
         t0 = time.time()
         try:
-            llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=os.getenv("GOOGLE_API_KEY"))
-            out = llm.invoke("Hi").content[:200]
-            record("gemini", status="ok", latency_ms=int((time.time()-t0)*1000), sample=out)
+            # Try a short list of Gemini models (prefer env override). This helps
+            # when the project has no quota for a particular model (429) — we
+            # attempt smaller/older models until one succeeds.
+            model_env = os.getenv("GOOGLE_MODEL")
+            candidates = [m for m in ([model_env] if model_env else []) + [
+                "gemini-2.5-flash",
+                "gemini-1.5-pro",
+                "gemini-1.0",
+            ] if m]
+
+            gemini_ok = False
+            last_err = None
+            for choice in candidates:
+                try:
+                    llm = ChatGoogleGenerativeAI(model=choice, google_api_key=os.getenv("GOOGLE_API_KEY"))
+                    out = llm.invoke("Hi").content[:200]
+                    record("gemini", status="ok", model=choice, latency_ms=int((time.time()-t0)*1000), sample=out)
+                    gemini_ok = True
+                    break
+                except Exception as e:
+                    last_err = str(e)
+                    # If it's explicitly a quota/billing error, capture and continue
+                    # to the next candidate so the script can try alternatives.
+                    # We don't re-raise here because some projects have zero free-tier
+                    # quota for newer models but may allow older/smaller ones.
+                    continue
+
+            if not gemini_ok:
+                # If nothing worked, show the last error (often a quota/billing message)
+                guidance = (
+                    "Gemini tests failed for all candidate models. If this is a quota or billing "
+                    "issue, enable billing or choose a model your project has access to. See: "
+                    "https://ai.google.dev/gemini-api/docs/rate-limits"
+                )
+                record("gemini", status="fail", error=last_err or "no candidate models tried", guidance=guidance)
         except Exception as e:
             record("gemini", status="fail", error=str(e))
     else:
@@ -53,9 +89,60 @@ if OK_LANGCHAIN:
     if os.getenv("HUGGINGFACE_API_TOKEN"):
         t0 = time.time()
         try:
-            llm = HuggingFaceHub(repo_id="microsoft/DialoGPT-medium", huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_TOKEN"), model_kwargs={"max_length":32})
-            out = llm.invoke("Hi").content[:200]
-            record("huggingface", status="ok", latency_ms=int((time.time()-t0)*1000), sample=out)
+            # Prefer the newer InferenceClient (router) when available
+            hf_model = os.getenv("HUGGINGFACE_MODEL", "gpt2")
+            token = os.getenv("HUGGINGFACE_API_TOKEN")
+            sample_text = None
+            try:
+                from huggingface_hub import InferenceClient
+                client = InferenceClient(token=token)
+                # Try the high-level text_generation helper if available
+                if hasattr(client, "text_generation"):
+                    resp = client.text_generation(model=hf_model, inputs="Hi", max_new_tokens=64)
+                    # resp can be a list of dicts or a dict-like object
+                    if isinstance(resp, list) and resp:
+                        first = resp[0]
+                        sample_text = (
+                            getattr(first, "generated_text", None)
+                            or (first.get("generated_text") if isinstance(first, dict) else None)
+                            or str(first)
+                        )
+                    elif isinstance(resp, dict):
+                        sample_text = resp.get("generated_text") or resp.get("text") or str(resp)
+                    else:
+                        sample_text = str(resp)
+                else:
+                    # Generic request: some InferenceClient versions expose a generic "request" or "post" method
+                    if hasattr(client, "request"):
+                        resp = client.request(model=hf_model, inputs="Hi")
+                    elif hasattr(client, "post"):
+                        resp = client.post(model=hf_model, inputs="Hi")
+                    else:
+                        # fall back to InferenceApi if InferenceClient shape is unexpected
+                        raise RuntimeError("InferenceClient missing expected helpers; falling back")
+                    sample_text = str(resp)
+            except Exception:
+                # Fallback to the older InferenceApi shape if InferenceClient isn't available or fails
+                from huggingface_hub import InferenceApi
+                client2 = InferenceApi(repo_id=hf_model, token=token)
+                try:
+                    resp = client2(inputs="Hi", raw_response=True)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = None
+                except TypeError:
+                    resp = client2(inputs="Hi")
+                    data = resp if isinstance(resp, dict) else None
+
+                if isinstance(data, dict):
+                    sample_text = data.get("generated_text") or data.get("text") or data.get("outputs") or str(data)
+                elif isinstance(resp, dict):
+                    sample_text = resp.get("generated_text") or resp.get("text") or str(resp)
+                else:
+                    sample_text = str(data or resp)
+
+            record("huggingface", status="ok", latency_ms=int((time.time()-t0)*1000), sample=(sample_text[:200] if sample_text else ""))
         except Exception as e:
             record("huggingface", status="fail", error=str(e))
     else:

@@ -8,7 +8,7 @@ print('Loaded app module')
 print('GROQ_ENV', bool(os.getenv('GROQ_API_KEY')))
 
 try:
-    llm = app.try_create_llm('groq', 'llama3-8b-8192')
+    llm = app.try_create_llm('groq', 'llama-3.1-8b-instant')
     print('LLM object:', type(llm), repr(llm))
     if llm is None:
         print('LLM is None — creation failed or no API key/config')
